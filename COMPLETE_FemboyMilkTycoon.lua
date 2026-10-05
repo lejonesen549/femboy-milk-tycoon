@@ -1,7 +1,7 @@
 -- ============================================
--- FEMBOY MILK TYCOON - COMPLETE POLISHED VERSION
+-- FEMBOY MILK TYCOON - MULTIPLAYER PLOT EDITION
 -- Place in ServerScriptService
--- This is the COMPLETE, PRODUCTION-READY game
+-- Each player gets their own private plot with building
 -- ============================================
 
 local Players = game:GetService("Players")
@@ -14,12 +14,13 @@ local Debris = game:GetService("Debris")
 -- ============================================
 
 local CONFIG = {
-	WORLD_SIZE = 500,
-	PLOT_SIZE = 24,
+	TOTAL_PLOTS = 8,
+	PLOT_SIZE = 50,
 	BUILDING_HEIGHT = 18,
-	TOTAL_FLOORS = 5,
-	MAX_PLOTS = 4,
 	PRODUCTION_TICK = 1,
+	
+	-- Starting money so players can actually play
+	STARTING_CASH = 1000,
 	
 	-- Costs
 	FEMBOY_BASE_COST = 200,
@@ -28,9 +29,7 @@ local CONFIG = {
 	TOMBOY_SCALE = 2000,
 	REBIRTH_BASE_COST = 50000,
 	REBIRTH_SCALE = 30000,
-	PLOT_UNLOCK_COST = 8000,
-	STORE_UPGRADE_1 = 2000,
-	STORE_UPGRADE_2 = 9000,
+	UPGRADE_BASE_COST = 500,
 	
 	-- Production rates
 	FEMBOY_PRODUCTION = 2,
@@ -57,25 +56,22 @@ local CONFIG = {
 -- ============================================
 
 local playerData = {}
+local plotOwnership = {} -- Maps plot number to player userId
 
 local DEFAULT_PROFILE = {
-	Cash = 0,
+	Cash = CONFIG.STARTING_CASH,
 	Milk = 0,
 	Rebirths = 0,
 	Level = 1,
 	Production = 0,
-	PlotUnlocked = 1,
+	OwnedPlot = 0,
 	FemboyWorkers = 0,
 	TomboyWorkers = 0,
-	StoreLevel = 1,
+	BuildingLevel = 1,
 	PrestigeMultiplier = 1,
 	TotalMilk = 0,
-	TotalCash = 0,
+	TotalCash = CONFIG.STARTING_CASH,
 	OwnedDecor = {},
-	LastCollected = tick(),
-	HasGUI = false,
-	PlotUpgrades = {1, 0, 0, 0},
-	PlotDecor = {{}, {}, {}, {}},
 }
 
 local function getProfile(player)
@@ -121,7 +117,7 @@ end
 local function getProductionRate(player)
 	local p = getProfile(player)
 	local workerProduction = (p.FemboyWorkers * CONFIG.FEMBOY_PRODUCTION) + (p.TomboyWorkers * CONFIG.TOMBOY_PRODUCTION)
-	local storeMultiplier = CONFIG.STORE_MULTIPLIER ^ p.StoreLevel
+	local storeMultiplier = CONFIG.STORE_MULTIPLIER ^ p.BuildingLevel
 	return math.floor(workerProduction * storeMultiplier * p.PrestigeMultiplier)
 end
 
@@ -152,13 +148,13 @@ local plotFolder = Instance.new("Folder")
 plotFolder.Name = "Plots"
 plotFolder.Parent = tycoonModel
 
+local pathwayFolder = Instance.new("Folder")
+pathwayFolder.Name = "Pathways"
+pathwayFolder.Parent = tycoonModel
+
 local decorFolder = Instance.new("Folder")
 decorFolder.Name = "Decorations"
 decorFolder.Parent = tycoonModel
-
-local buildingsFolder = Instance.new("Folder")
-buildingsFolder.Name = "Buildings"
-buildingsFolder.Parent = tycoonModel
 
 local function makePart(parent, size, cframe, color, material, transparency, canCollide)
 	local p = Instance.new("Part")
@@ -175,7 +171,7 @@ local function makePart(parent, size, cframe, color, material, transparency, can
 	return p
 end
 
-local function createTextSign(part, text, size, fontSize)
+local function createTextSign(part, text, size)
 	local gui = Instance.new("SurfaceGui")
 	gui.Face = Enum.NormalId.Front
 	gui.SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud
@@ -196,213 +192,85 @@ local function createTextSign(part, text, size, fontSize)
 end
 
 -- Ground base
-local groundBase = makePart(tycoonModel, Vector3.new(250, 4, 250), CFrame.new(0, -2, 0), Color3.fromRGB(100, 110, 120), Enum.Material.Slate, 0, true)
+local groundBase = makePart(tycoonModel, Vector3.new(400, 2, 400), CFrame.new(0, -1, 0), Color3.fromRGB(60, 70, 60), Enum.Material.Grass, 0, true)
 groundBase.Name = "GroundBase"
 
--- Grass area
-for x = -8, 8 do
-	for z = -8, 8 do
-		if (x * x + z * z) > 10 then
-			makePart(tycoonModel, Vector3.new(10, 1, 10), CFrame.new(x * 10, 0.5, z * 10), Color3.fromRGB(85, 145, 75), Enum.Material.Grass, 0, false)
-		end
-	end
-end
-
--- Spawn pad
-local spawnPad = makePart(tycoonModel, Vector3.new(50, 1, 50), CFrame.new(0, 1, 90), Color3.fromRGB(80, 90, 110), Enum.Material.Slate, 0, true)
+-- Spawn area in center
+local spawnPad = makePart(tycoonModel, Vector3.new(40, 1, 40), CFrame.new(0, 1, 0), Color3.fromRGB(100, 120, 100), Enum.Material.Slate, 0, true)
 spawnPad.Name = "SpawnPad"
-createTextSign(spawnPad, "SPAWN AREA", Vector2.new(400, 100))
+createTextSign(spawnPad, "HUB - CLAIM YOUR PLOT!", Vector2.new(400, 100))
 
--- Main building lot
-local mainLot = makePart(tycoonModel, Vector3.new(130, 1, 130), CFrame.new(0, 1, 0), Color3.fromRGB(65, 72, 82), Enum.Material.Pavement, 0, true)
+-- Generate 8 plots in a circle
+local plotPositions = {}
+local centerX, centerZ = 0, 0
+local radius = 120
 
--- Floor generation with detailed decoration
-local floorData = {}
-
-for floorIdx = 1, CONFIG.TOTAL_FLOORS do
-	local yPos = (floorIdx - 1) * CONFIG.BUILDING_HEIGHT + 1
-	
-	-- Floor base
-	local floorBase = makePart(buildingsFolder, Vector3.new(85, 1, 85), CFrame.new(0, yPos, 0), Color3.fromRGB(81, 90, 108), Enum.Material.Slate, 0, true)
-	floorBase.Name = "FloorBase_" .. floorIdx
-	
-	-- Ceiling
-	local ceiling = makePart(buildingsFolder, Vector3.new(85, 1, 85), CFrame.new(0, yPos + 9, 0), Color3.fromRGB(112, 122, 138), Enum.Material.SmoothPlastic, 0.1, false)
-	ceiling.Name = "FloorCeiling_" .. floorIdx
-	
-	-- Walls
-	makePart(buildingsFolder, Vector3.new(75, 9, 1), CFrame.new(0, yPos + 4.5, -42.5), Color3.fromRGB(124, 132, 145), Enum.Material.SmoothPlastic, 0, false)
-	makePart(buildingsFolder, Vector3.new(75, 9, 1), CFrame.new(0, yPos + 4.5, 42.5), Color3.fromRGB(124, 132, 145), Enum.Material.SmoothPlastic, 0, false)
-	makePart(buildingsFolder, Vector3.new(1, 9, 75), CFrame.new(-42.5, yPos + 4.5, 0), Color3.fromRGB(124, 132, 145), Enum.Material.SmoothPlastic, 0, false)
-	makePart(buildingsFolder, Vector3.new(1, 9, 75), CFrame.new(42.5, yPos + 4.5, 0), Color3.fromRGB(124, 132, 145), Enum.Material.SmoothPlastic, 0, false)
-	
-	-- Glass windows
-	local glassFront = makePart(buildingsFolder, Vector3.new(55, 8, 0.5), CFrame.new(0, yPos + 4.5, -42.25), Color3.fromRGB(153, 206, 255), Enum.Material.Glass, 0.25, false)
-	local glassBack = makePart(buildingsFolder, Vector3.new(55, 8, 0.5), CFrame.new(0, yPos + 4.5, 42.25), Color3.fromRGB(153, 206, 255), Enum.Material.Glass, 0.25, false)
-	
-	-- Floor sign with unique colors per floor
-	local signColor = Color3.fromRGB(255, 88, 186)
-	local floorName = "FLOOR " .. floorIdx
-	
-	if floorIdx == 1 then
-		floorName = "🏢 MAIN HQ"
-		signColor = Color3.fromRGB(100, 200, 255)
-	elseif floorIdx == 2 then
-		floorName = "⚙️ PRODUCTION"
-		signColor = Color3.fromRGB(200, 150, 100)
-	elseif floorIdx == 3 then
-		floorName = "🔧 PROCESSING"
-		signColor = Color3.fromRGB(150, 100, 200)
-	elseif floorIdx == 4 then
-		floorName = "✅ QUALITY"
-		signColor = Color3.fromRGB(100, 200, 100)
-	elseif floorIdx == 5 then
-		floorName = "💪 TOMBOY LAB"
-		signColor = Color3.fromRGB(255, 150, 100)
-	end
-	
-	local floorSign = makePart(buildingsFolder, Vector3.new(16, 4, 1), CFrame.new(0, yPos + 8, -42), signColor, Enum.Material.Neon, 0, false)
-	createTextSign(floorSign, floorName, Vector2.new(800, 200))
-	
-	-- Corner pillars
-	makePart(buildingsFolder, Vector3.new(4, 10, 4), CFrame.new(-38, yPos + 4.5, -38), Color3.fromRGB(160, 170, 180), Enum.Material.Concrete, 0, false)
-	makePart(buildingsFolder, Vector3.new(4, 10, 4), CFrame.new(38, yPos + 4.5, -38), Color3.fromRGB(160, 170, 180), Enum.Material.Concrete, 0, false)
-	makePart(buildingsFolder, Vector3.new(4, 10, 4), CFrame.new(-38, yPos + 4.5, 38), Color3.fromRGB(160, 170, 180), Enum.Material.Concrete, 0, false)
-	makePart(buildingsFolder, Vector3.new(4, 10, 4), CFrame.new(38, yPos + 4.5, 38), Color3.fromRGB(160, 170, 180), Enum.Material.Concrete, 0, false)
-	
-	-- Floor-specific production machines
-	if floorIdx == 1 then
-		-- Main floor: milk storage tanks
-		local tank1 = makePart(decorFolder, Vector3.new(15, 8, 15), CFrame.new(-25, yPos + 2, -20), Color3.fromRGB(220, 240, 255), Enum.Material.SmoothPlastic, 0.15, false)
-		createTextSign(tank1, "MILK TANK", Vector2.new(600, 200))
-		
-		local tank2 = makePart(decorFolder, Vector3.new(15, 8, 15), CFrame.new(25, yPos + 2, -20), Color3.fromRGB(220, 240, 255), Enum.Material.SmoothPlastic, 0.15, false)
-		createTextSign(tank2, "MILK TANK", Vector2.new(600, 200))
-		
-		local control = makePart(decorFolder, Vector3.new(8, 6, 8), CFrame.new(0, yPos + 1, 25), Color3.fromRGB(100, 100, 100), Enum.Material.Metal, 0, false)
-		createTextSign(control, "CONTROL", Vector2.new(400, 150))
-		
-		local screen = makePart(decorFolder, Vector3.new(12, 5, 1), CFrame.new(0, yPos + 3, 28), Color3.fromRGB(50, 100, 150), Enum.Material.SmoothPlastic, 0, false)
-		screen.CanCollide = false
-		
-	elseif floorIdx == 2 then
-		-- Floor 2: production pumps
-		local pump1 = makePart(decorFolder, Vector3.new(10, 8, 10), CFrame.new(-20, yPos + 2, 0), Color3.fromRGB(140, 160, 180), Enum.Material.Metal, 0, false)
-		createTextSign(pump1, "PUMP 1", Vector2.new(400, 150))
-		
-		local pump2 = makePart(decorFolder, Vector3.new(10, 8, 10), CFrame.new(20, yPos + 2, 0), Color3.fromRGB(140, 160, 180), Enum.Material.Metal, 0, false)
-		createTextSign(pump2, "PUMP 2", Vector2.new(400, 150))
-		
-		local pump3 = makePart(decorFolder, Vector3.new(10, 8, 10), CFrame.new(0, yPos + 2, 20), Color3.fromRGB(140, 160, 180), Enum.Material.Metal, 0, false)
-		createTextSign(pump3, "PUMP 3", Vector2.new(400, 150))
-		
-		-- Pipe decorations
-		makePart(decorFolder, Vector3.new(2, 12, 2), CFrame.new(-20, yPos + 6, 0), Color3.fromRGB(100, 100, 100), Enum.Material.Metal, 0, false)
-		makePart(decorFolder, Vector3.new(2, 12, 2), CFrame.new(20, yPos + 6, 0), Color3.fromRGB(100, 100, 100), Enum.Material.Metal, 0, false)
-		
-	elseif floorIdx == 3 then
-		-- Floor 3: processing units
-		local unit1 = makePart(decorFolder, Vector3.new(12, 7, 12), CFrame.new(-18, yPos + 2, 10), Color3.fromRGB(180, 120, 100), Enum.Material.SmoothPlastic, 0, false)
-		createTextSign(unit1, "PROCESSOR", Vector2.new(500, 150))
-		
-		local unit2 = makePart(decorFolder, Vector3.new(12, 7, 12), CFrame.new(18, yPos + 2, 10), Color3.fromRGB(180, 120, 100), Enum.Material.SmoothPlastic, 0, false)
-		createTextSign(unit2, "PROCESSOR", Vector2.new(500, 150))
-		
-		local unit3 = makePart(decorFolder, Vector3.new(12, 7, 12), CFrame.new(0, yPos + 2, -15), Color3.fromRGB(180, 120, 100), Enum.Material.SmoothPlastic, 0, false)
-		createTextSign(unit3, "PROCESSOR", Vector2.new(500, 150))
-		
-	elseif floorIdx == 4 then
-		-- Floor 4: quality assurance
-		local qa1 = makePart(decorFolder, Vector3.new(14, 6, 14), CFrame.new(-15, yPos + 2, -15), Color3.fromRGB(100, 180, 200), Enum.Material.SmoothPlastic, 0, false)
-		createTextSign(qa1, "QUALITY", Vector2.new(500, 150))
-		
-		local qa2 = makePart(decorFolder, Vector3.new(14, 6, 14), CFrame.new(15, yPos + 2, -15), Color3.fromRGB(100, 180, 200), Enum.Material.SmoothPlastic, 0, false)
-		createTextSign(qa2, "QUALITY", Vector2.new(500, 150))
-		
-		local qa3 = makePart(decorFolder, Vector3.new(14, 6, 14), CFrame.new(0, yPos + 2, 20), Color3.fromRGB(100, 180, 200), Enum.Material.SmoothPlastic, 0, false)
-		createTextSign(qa3, "QUALITY", Vector2.new(500, 150))
-		
-	elseif floorIdx == 5 then
-		-- Floor 5: tomboy lab - ultra powerful
-		local lab1 = makePart(decorFolder, Vector3.new(16, 7, 16), CFrame.new(-22, yPos + 2, 5), Color3.fromRGB(255, 150, 100), Enum.Material.Neon, 0.05, false)
-		createTextSign(lab1, "TOMBOY 💪", Vector2.new(600, 200))
-		
-		local lab2 = makePart(decorFolder, Vector3.new(16, 7, 16), CFrame.new(22, yPos + 2, 5), Color3.fromRGB(255, 150, 100), Enum.Material.Neon, 0.05, false)
-		createTextSign(lab2, "TOMBOY 💪", Vector2.new(600, 200))
-		
-		local lab3 = makePart(decorFolder, Vector3.new(16, 7, 16), CFrame.new(0, yPos + 2, -22), Color3.fromRGB(255, 150, 100), Enum.Material.Neon, 0.05, false)
-		createTextSign(lab3, "TOMBOY 💪", Vector2.new(600, 200))
-	end
-	
-	floorData[floorIdx] = {
-		yPos = yPos,
-		floorBase = floorBase,
-	}
+for i = 1, CONFIG.TOTAL_PLOTS do
+	local angle = (i - 1) * (2 * math.pi / CONFIG.TOTAL_PLOTS)
+	local x = centerX + radius * math.cos(angle)
+	local z = centerZ + radius * math.sin(angle)
+	table.insert(plotPositions, Vector3.new(x, 0, z))
 end
 
--- Stairs connecting floors
-for i = 1, CONFIG.TOTAL_FLOORS - 1 do
-	for step = 0, 3 do
-		local stairY = (i - 1) * CONFIG.BUILDING_HEIGHT + 1 + (step * 2)
-		makePart(buildingsFolder, Vector3.new(12, 1, 8), CFrame.new(-25 + step * 3, stairY, 35), Color3.fromRGB(170, 170, 180), Enum.Material.SmoothPlastic, 0, true)
-	end
+-- Create pathways connecting plots in a circle
+for i = 1, CONFIG.TOTAL_PLOTS do
+	local nextI = i == CONFIG.TOTAL_PLOTS and 1 or i + 1
+	local startPos = plotPositions[i]
+	local endPos = plotPositions[nextI]
+	
+	-- Create pathway segment
+	local midX = (startPos.X + endPos.X) / 2
+	local midZ = (startPos.Z + endPos.Z) / 2
+	local distance = math.sqrt((endPos.X - startPos.X)^2 + (endPos.Z - startPos.Z)^2)
+	
+	local pathway = makePart(pathwayFolder, Vector3.new(6, 0.5, distance + 10), CFrame.new(midX, 0.75, midZ), Color3.fromRGB(120, 100, 80), Enum.Material.Concrete, 0, false)
+	pathways = pathways or {}
+	table.insert(pathways, pathway)
+end
+
+-- Create pathway from center to each plot
+for i, pos in ipairs(plotPositions) do
+	local distance = math.sqrt(pos.X^2 + pos.Z^2)
+	local midX = pos.X / 2
+	local midZ = pos.Z / 2
+	local pathway = makePart(pathwayFolder, Vector3.new(6, 0.5, distance), CFrame.new(midX, 0.75, midZ), Color3.fromRGB(120, 100, 80), Enum.Material.Concrete, 0, false)
 end
 
 -- ============================================
--- PLOT SYSTEM WITH PER-PLAYER UPGRADES
+-- PLOT CLAIM SYSTEM
 -- ============================================
-
-local plotPositions = {
-	Vector3.new(-60, 1.5, -60),
-	Vector3.new(60, 1.5, -60),
-	Vector3.new(-60, 1.5, 60),
-	Vector3.new(60, 1.5, 60),
-}
 
 local plots = {}
-local plotOwners = {}
 
-for i = 1, CONFIG.MAX_PLOTS do
+for i = 1, CONFIG.TOTAL_PLOTS do
+	local pos = plotPositions[i]
+	
 	local plot = Instance.new("Model")
 	plot.Name = "Plot" .. i
 	plot.Parent = plotFolder
 
-	local pad = makePart(plot, Vector3.new(CONFIG.PLOT_SIZE + 2, 1, CONFIG.PLOT_SIZE + 2), CFrame.new(plotPositions[i]), Color3.fromRGB(76, 80, 90), Enum.Material.SmoothPlastic, i > 1 and 0.4 or 0, i == 1)
+	-- Plot ground pad
+	local pad = makePart(plot, Vector3.new(CONFIG.PLOT_SIZE, 1, CONFIG.PLOT_SIZE), CFrame.new(pos.X, 1, pos.Z), Color3.fromRGB(76, 90, 100), Enum.Material.Slate, 0, true)
 	pad.Name = "Pad"
 
-	-- Counter/workspace
-	local counter = makePart(plot, Vector3.new(16, 2.5, 8), CFrame.new(plotPositions[i] + Vector3.new(0, 2, 10)), Color3.fromRGB(58, 62, 68), Enum.Material.SmoothPlastic, 0, true)
-	counter.CanCollide = true
+	-- Plot claim sign
+	local claimSign = makePart(plot, Vector3.new(14, 4, 1), CFrame.new(pos.X, 5, pos.Z - CONFIG.PLOT_SIZE/2 + 2), Color3.fromRGB(100, 200, 255), Enum.Material.Neon, 0, false)
+	claimSign.Name = "ClaimSign"
+	local claimLabel = createTextSign(claimSign, "PLOT " .. i .. "\n[UNCLAIMED]\nCLICK TO CLAIM", Vector2.new(700, 250))
 
-	-- Plot sign
-	local sign = makePart(plot, Vector3.new(12, 3, 1), CFrame.new(plotPositions[i] + Vector3.new(0, 5, 13)), Color3.fromRGB(88, 162, 255), Enum.Material.Neon, 0, false)
-	sign.CanCollide = false
-	local label = createTextSign(sign, "PLOT " .. i, Vector2.new(600, 200))
-	if i > 1 then
-		label.Text = "PLOT " .. i .. "\n[LOCKED]\n$" .. CONFIG.PLOT_UNLOCK_COST
-	end
-	
-	-- Storage area
-	local storage = makePart(plot, Vector3.new(10, 3.5, 10), CFrame.new(plotPositions[i] + Vector3.new(-12, 2.5, -8)), Color3.fromRGB(120, 100, 80), Enum.Material.Wood, 0, false)
-	storage.CanCollide = false
-	createTextSign(storage, "STORAGE", Vector2.new(400, 150))
-	
-	-- Upgrade indicator
-	local upgradeSign = makePart(plot, Vector3.new(8, 2, 1), CFrame.new(plotPositions[i] + Vector3.new(12, 2, -13)), Color3.fromRGB(255, 200, 0), Enum.Material.Neon, 0, false)
-	upgradeSign.CanCollide = false
-	local upgradeLabel = createTextSign(upgradeSign, "LV: 1", Vector2.new(400, 100))
+	-- Storage marker
+	local storage = makePart(plot, Vector3.new(8, 3, 8), CFrame.new(pos.X - 15, 2, pos.Z), Color3.fromRGB(120, 100, 80), Enum.Material.Wood, 0, true)
+	storage.Name = "StorageMarker"
 
 	plots[i] = {
 		model = plot,
 		pad = pad,
-		counter = counter,
-		sign = sign,
+		claimSign = claimSign,
+		claimLabel = claimLabel,
 		storage = storage,
-		upgradeSign = upgradeSign,
-		upgradeLabel = upgradeLabel,
-		position = plotPositions[i],
-		locked = i > 1,
-		level = 1,
+		position = Vector3.new(pos.X, 2, pos.Z),
+		owner = nil,
+		buildingLevel = 1,
 	}
 end
 
@@ -410,51 +278,96 @@ end
 -- ENVIRONMENT DECORATION
 -- ============================================
 
--- Trees
+-- Trees around the world
 local treePositions = {
-	Vector3.new(-120, 0.5, -100),
-	Vector3.new(-120, 0.5, 100),
-	Vector3.new(120, 0.5, -100),
-	Vector3.new(120, 0.5, 100),
-	Vector3.new(-100, 0.5, -120),
-	Vector3.new(100, 0.5, -120),
-	Vector3.new(-100, 0.5, 120),
-	Vector3.new(100, 0.5, 120),
+	Vector3.new(-180, 0, -180), Vector3.new(-180, 0, 180), Vector3.new(180, 0, -180), Vector3.new(180, 0, 180),
+	Vector3.new(-140, 0, 0), Vector3.new(140, 0, 0), Vector3.new(0, 0, -140), Vector3.new(0, 0, 140),
 }
 
-for _, pos in ipairs(treePositions) do
-	local trunk = makePart(decorFolder, Vector3.new(2.5, 16, 2.5), CFrame.new(pos + Vector3.new(0, 8, 0)), Color3.fromRGB(118, 83, 52), Enum.Material.Wood, 0, false)
-	local leaves = makePart(decorFolder, Vector3.new(14, 12, 14), CFrame.new(pos + Vector3.new(0, 16, 0)), Color3.fromRGB(69, 146, 85), Enum.Material.Grass, 0, false)
+for _, tpos in ipairs(treePositions) do
+	local trunk = makePart(decorFolder, Vector3.new(3, 20, 3), CFrame.new(tpos + Vector3.new(0, 10, 0)), Color3.fromRGB(118, 83, 52), Enum.Material.Wood, 0, false)
+	local leaves = makePart(decorFolder, Vector3.new(16, 14, 16), CFrame.new(tpos + Vector3.new(0, 18, 0)), Color3.fromRGB(69, 146, 85), Enum.Material.Grass, 0, false)
 	leaves.Shape = Enum.PartType.Ball
 end
 
--- Lampposts
-for x = -100, 100, 50 do
-	for z = -100, 100, 50 do
-		if math.abs(x) > 30 or math.abs(z) > 30 then
-			local post = makePart(decorFolder, Vector3.new(1.5, 14, 1.5), CFrame.new(x, 7, z), Color3.fromRGB(60, 60, 60), Enum.Material.Concrete, 0, false)
-			local light = makePart(decorFolder, Vector3.new(8, 2, 8), CFrame.new(x, 14, z), Color3.fromRGB(255, 255, 150), Enum.Material.Neon, 0.2, false)
+-- Lampposts at intervals
+for i = 1, CONFIG.TOTAL_PLOTS do
+	local pos = plotPositions[i]
+	local post = makePart(decorFolder, Vector3.new(1.5, 16, 1.5), CFrame.new(pos.X, 8, pos.Z + 25), Color3.fromRGB(60, 60, 60), Enum.Material.Concrete, 0, false)
+	local light = makePart(decorFolder, Vector3.new(8, 2, 8), CFrame.new(pos.X, 16, pos.Z + 25), Color3.fromRGB(255, 255, 150), Enum.Material.Neon, 0.2, false)
+end
+
+-- ============================================
+-- PLAYER BUILDING SYSTEM
+-- ============================================
+
+local function buildPlayerBuilding(plotNumber, player)
+	local plot = plots[plotNumber]
+	local profile = getProfile(player)
+	local buildingFolder = Instance.new("Folder")
+	buildingFolder.Name = "Building_" .. player.UserId
+	buildingFolder.Parent = plot.model
+	
+	local pos = plot.position
+	
+	-- Base floor
+	local baseFloor = makePart(buildingFolder, Vector3.new(30, 1, 30), CFrame.new(pos.X, pos.Y, pos.Z), Color3.fromRGB(90, 100, 120), Enum.Material.Slate, 0, true)
+	baseFloor.Name = "BaseFloor"
+	
+	-- Main building structure
+	for floorIdx = 1, profile.BuildingLevel do
+		local yPos = pos.Y + (floorIdx - 1) * CONFIG.BUILDING_HEIGHT
+		
+		-- Floor
+		local floor = makePart(buildingFolder, Vector3.new(28, 1, 28), CFrame.new(pos.X, yPos, pos.Z), Color3.fromRGB(81, 90, 108), Enum.Material.Slate, 0, true)
+		floor.Name = "Floor_" .. floorIdx
+		
+		-- Ceiling
+		local ceiling = makePart(buildingFolder, Vector3.new(28, 1, 28), CFrame.new(pos.X, yPos + 8, pos.Z), Color3.fromRGB(112, 122, 138), Enum.Material.SmoothPlastic, 0.1, false)
+		
+		-- Walls
+		makePart(buildingFolder, Vector3.new(26, 8, 1), CFrame.new(pos.X, yPos + 4, pos.Z - 14), Color3.fromRGB(124, 132, 145), Enum.Material.SmoothPlastic, 0, true)
+		makePart(buildingFolder, Vector3.new(26, 8, 1), CFrame.new(pos.X, yPos + 4, pos.Z + 14), Color3.fromRGB(124, 132, 145), Enum.Material.SmoothPlastic, 0, true)
+		makePart(buildingFolder, Vector3.new(1, 8, 26), CFrame.new(pos.X - 14, yPos + 4, pos.Z), Color3.fromRGB(124, 132, 145), Enum.Material.SmoothPlastic, 0, true)
+		makePart(buildingFolder, Vector3.new(1, 8, 26), CFrame.new(pos.X + 14, yPos + 4, pos.Z), Color3.fromRGB(124, 132, 145), Enum.Material.SmoothPlastic, 0, true)
+		
+		-- Glass window
+		local glass = makePart(buildingFolder, Vector3.new(20, 6, 0.5), CFrame.new(pos.X, yPos + 4, pos.Z - 13.75), Color3.fromRGB(153, 206, 255), Enum.Material.Glass, 0.25, false)
+		
+		-- Floor sign
+		local floorColor = Color3.fromRGB(255, 100, 200)
+		if floorIdx == 1 then floorColor = Color3.fromRGB(100, 200, 255) end
+		if floorIdx == profile.BuildingLevel then floorColor = Color3.fromRGB(255, 150, 100) end
+		
+		local floorSign = makePart(buildingFolder, Vector3.new(12, 3, 1), CFrame.new(pos.X, yPos + 7, pos.Z - 14), floorColor, Enum.Material.Neon, 0, false)
+		createTextSign(floorSign, "FLOOR " .. floorIdx, Vector2.new(600, 150))
+		
+		-- Production machines on first floor
+		if floorIdx == 1 then
+			local machine1 = makePart(buildingFolder, Vector3.new(8, 6, 8), CFrame.new(pos.X - 8, yPos + 1, pos.Z + 5), Color3.fromRGB(140, 160, 180), Enum.Material.Metal, 0, true)
+			createTextSign(machine1, "PUMP", Vector2.new(400, 150))
+			
+			local machine2 = makePart(buildingFolder, Vector3.new(8, 6, 8), CFrame.new(pos.X + 8, yPos + 1, pos.Z + 5), Color3.fromRGB(140, 160, 180), Enum.Material.Metal, 0, true)
+			createTextSign(machine2, "PUMP", Vector2.new(400, 150))
+		end
+		
+		-- Stairs (if not top floor)
+		if floorIdx < profile.BuildingLevel then
+			for step = 0, 2 do
+				local stair = makePart(buildingFolder, Vector3.new(8, 1, 6), CFrame.new(pos.X - 10 + step * 3, yPos + 1 + (step * 2.5), pos.Z - 8), Color3.fromRGB(170, 170, 180), Enum.Material.SmoothPlastic, 0, true)
+			end
 		end
 	end
-end
-
--- Benches
-local benchPositions = {
-	Vector3.new(-85, 1, -85),
-	Vector3.new(85, 1, 85),
-	Vector3.new(-85, 1, 85),
-	Vector3.new(85, 1, -85),
-}
-
-for _, pos in ipairs(benchPositions) do
-	local bench = makePart(decorFolder, Vector3.new(18, 2, 8), CFrame.new(pos), Color3.fromRGB(100, 80, 60), Enum.Material.Wood, 0, false)
+	
+	plot.buildingFolder = buildingFolder
+	return buildingFolder
 end
 
 -- ============================================
--- PLAYER SPAWN & CAMERA
+-- PLAYER SPAWN
 -- ============================================
 
-local spawnPoint = CFrame.new(0, 7, 95)
+local spawnPoint = CFrame.new(0, 5, 0)
 
 local function teleportToSpawn(character)
 	task.wait(0.5)
@@ -465,15 +378,11 @@ local function teleportToSpawn(character)
 end
 
 -- ============================================
--- ADVANCED GUI SYSTEM - PRODUCTION READY
+-- ADVANCED GUI SYSTEM
 -- ============================================
 
 local function createAdvancedGUI(player)
 	local playerGui = player:WaitForChild("PlayerGui")
-	
-	-- ============================================
-	-- MAIN SCREEN GUI
-	-- ============================================
 	
 	local screenGui = Instance.new("ScreenGui")
 	screenGui.Name = "TycoonGui"
@@ -481,13 +390,10 @@ local function createAdvancedGUI(player)
 	screenGui.DisplayOrder = 100
 	screenGui.Parent = playerGui
 
-	-- ============================================
-	-- MAIN STATS FRAME
-	-- ============================================
-	
+	-- Main stats frame
 	local statsFrame = Instance.new("Frame")
 	statsFrame.Name = "StatsFrame"
-	statsFrame.Size = UDim2.new(0, 480, 0, 320)
+	statsFrame.Size = UDim2.new(0, 480, 0, 350)
 	statsFrame.Position = UDim2.new(1, -500, 0, 20)
 	statsFrame.BackgroundColor3 = Color3.fromRGB(20, 22, 28)
 	statsFrame.BorderSizePixel = 0
@@ -508,7 +414,7 @@ local function createAdvancedGUI(player)
 	title.Size = UDim2.new(1, -30, 0, 50)
 	title.Position = UDim2.new(0, 15, 0, 10)
 	title.BackgroundTransparency = 1
-	title.Text = "💎 FEMBOY MILK TYCOON"
+	title.Text = "💎 YOUR PLOT"
 	title.Font = Enum.Font.GothamBlack
 	title.TextScaled = true
 	title.TextColor3 = Color3.fromRGB(255, 100, 200)
@@ -532,17 +438,16 @@ local function createAdvancedGUI(player)
 	-- Buttons frame
 	local buttonsFrame = Instance.new("Frame")
 	buttonsFrame.Name = "ButtonsFrame"
-	buttonsFrame.Size = UDim2.new(1, -30, 0, 100)
-	buttonsFrame.Position = UDim2.new(0, 15, 1, -115)
+	buttonsFrame.Size = UDim2.new(1, -30, 0, 140)
+	buttonsFrame.Position = UDim2.new(0, 15, 1, -155)
 	buttonsFrame.BackgroundTransparency = 1
 	buttonsFrame.Parent = statsFrame
 
 	local buttonLayout = Instance.new("UIGridLayout")
-	buttonLayout.CellSize = UDim2.new(0.5, -7, 0.5, -7)
+	buttonLayout.CellSize = UDim2.new(0.5, -7, 0.33, -7)
 	buttonLayout.CellPadding = UDim2.new(0, 14, 0, 14)
 	buttonLayout.Parent = buttonsFrame
 
-	-- Helper function for buttons
 	local function createButton(name, text, color, parent)
 		local btn = Instance.new("TextButton")
 		btn.Name = name
@@ -560,25 +465,21 @@ local function createAdvancedGUI(player)
 		btnCorner.CornerRadius = UDim.new(0, 10)
 		btnCorner.Parent = btn
 
-		local btnStroke = Instance.new("UIStroke")
-		btnStroke.Color = Color3.fromRGB(255, 255, 255)
-		btnStroke.Thickness = 1
-		btnStroke.Transparency = 0.7
-		btnStroke.Parent = btn
-
 		return btn
 	end
 
 	local hireBtn = createButton("HireFemboy", "👗 Hire Femboy\n$0", Color3.fromRGB(93, 166, 255), buttonsFrame)
 	local tomboyBtn = createButton("HireTomboy", "💪 Hire Tomboy\n$0", Color3.fromRGB(255, 107, 198), buttonsFrame)
-	local collectBtn = createButton("Collect", "🥛 Collect Milk\n+0 Cash", Color3.fromRGB(56, 208, 117), buttonsFrame)
-	local shopBtn = createButton("Shop", "🛍️ Shop Decor", Color3.fromRGB(255, 180, 0), buttonsFrame)
+	local collectBtn = createButton("Collect", "🥛 Collect\n+0", Color3.fromRGB(56, 208, 117), buttonsFrame)
+	local upgradeBtn = createButton("Upgrade", "🏢 Upgrade\nBuilding", Color3.fromRGB(200, 150, 100), buttonsFrame)
+	local shopBtn = createButton("Shop", "🛍️ Decor", Color3.fromRGB(255, 180, 0), buttonsFrame)
+	local rebirthBtn = createButton("Rebirth", "🔥 Rebirth\n[0]", Color3.fromRGB(255, 190, 75), buttonsFrame)
 
 	-- Prestige frame
 	local prestigeFrame = Instance.new("Frame")
 	prestigeFrame.Name = "PrestigeFrame"
-	prestigeFrame.Size = UDim2.new(0, 480, 0, 100)
-	prestigeFrame.Position = UDim2.new(1, -500, 0, 345)
+	prestigeFrame.Size = UDim2.new(0, 480, 0, 60)
+	prestigeFrame.Position = UDim2.new(1, -500, 0, 375)
 	prestigeFrame.BackgroundColor3 = Color3.fromRGB(20, 22, 28)
 	prestigeFrame.BorderSizePixel = 0
 	prestigeFrame.Parent = screenGui
@@ -594,97 +495,14 @@ local function createAdvancedGUI(player)
 
 	local prestigeLabel = Instance.new("TextLabel")
 	prestigeLabel.Name = "Label"
-	prestigeLabel.Size = UDim2.new(1, -30, 0, 30)
-	prestigeLabel.Position = UDim2.new(0, 15, 0, 8)
+	prestigeLabel.Size = UDim2.new(1, -30, 1, 0)
+	prestigeLabel.Position = UDim2.new(0, 15, 0, 0)
 	prestigeLabel.BackgroundTransparency = 1
 	prestigeLabel.Text = "⭐ Prestige: 1.00x | Rebirths: 0"
 	prestigeLabel.Font = Enum.Font.GothamBold
 	prestigeLabel.TextSize = 16
 	prestigeLabel.TextColor3 = Color3.fromRGB(255, 190, 75)
 	prestigeLabel.Parent = prestigeFrame
-
-	local rebirthBtn = Instance.new("TextButton")
-	rebirthBtn.Name = "Rebirth"
-	rebirthBtn.Size = UDim2.new(1, -30, 0, 50)
-	rebirthBtn.Position = UDim2.new(0, 15, 0, 42)
-	rebirthBtn.BackgroundColor3 = Color3.fromRGB(255, 190, 75)
-	rebirthBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-	rebirthBtn.Font = Enum.Font.GothamBold
-	rebirthBtn.Text = "🔥 REBIRTH / PRESTIGE 🔥 [0 Milk]"
-	rebirthBtn.TextSize = 14
-	rebirthBtn.Parent = prestigeFrame
-
-	local rebirthCorner = Instance.new("UICorner")
-	rebirthCorner.CornerRadius = UDim.new(0, 12)
-	rebirthCorner.Parent = rebirthBtn
-
-	local rebirthStroke = Instance.new("UIStroke")
-	rebirthStroke.Color = Color3.fromRGB(255, 255, 255)
-	rebirthStroke.Thickness = 1
-	rebirthStroke.Transparency = 0.5
-	rebirthStroke.Parent = rebirthBtn
-
-	-- ============================================
-	-- PLOT MANAGEMENT FRAME
-	-- ============================================
-
-	local plotFrame = Instance.new("Frame")
-	plotFrame.Name = "PlotFrame"
-	plotFrame.Size = UDim2.new(0, 480, 0, 250)
-	plotFrame.Position = UDim2.new(1, -500, 1, -270)
-	plotFrame.BackgroundColor3 = Color3.fromRGB(20, 22, 28)
-	plotFrame.BorderSizePixel = 0
-	plotFrame.Parent = screenGui
-
-	local plotCorner = Instance.new("UICorner")
-	plotCorner.CornerRadius = UDim.new(0, 16)
-	plotCorner.Parent = plotFrame
-
-	local plotStroke = Instance.new("UIStroke")
-	plotStroke.Color = Color3.fromRGB(100, 200, 255)
-	plotStroke.Thickness = 2
-	plotStroke.Parent = plotFrame
-
-	local plotTitle = Instance.new("TextLabel")
-	plotTitle.Size = UDim2.new(1, -30, 0, 30)
-	plotTitle.Position = UDim2.new(0, 15, 0, 8)
-	plotTitle.BackgroundTransparency = 1
-	plotTitle.Text = "📍 MY PLOTS"
-	plotTitle.Font = Enum.Font.GothamBold
-	plotTitle.TextSize = 16
-	plotTitle.TextColor3 = Color3.fromRGB(100, 200, 255)
-	plotTitle.Parent = plotFrame
-
-	local plotButtonsFrame = Instance.new("Frame")
-	plotButtonsFrame.Size = UDim2.new(1, -30, 1, -50)
-	plotButtonsFrame.Position = UDim2.new(0, 15, 0, 42)
-	plotButtonsFrame.BackgroundTransparency = 1
-	plotButtonsFrame.Parent = plotFrame
-
-	local plotLayout = Instance.new("UIGridLayout")
-	plotLayout.CellSize = UDim2.new(0.5, -8, 0.5, -8)
-	plotLayout.CellPadding = UDim2.new(0, 16, 0, 16)
-	plotLayout.Parent = plotButtonsFrame
-
-	local plotButtons = {}
-	for i = 1, 4 do
-		local pBtn = Instance.new("TextButton")
-		pBtn.Name = "Plot" .. i
-		pBtn.Size = UDim2.new(1, 0, 1, 0)
-		pBtn.Text = "PLOT " .. i
-		pBtn.BackgroundColor3 = i == 1 and Color3.fromRGB(100, 150, 200) or Color3.fromRGB(80, 80, 80)
-		pBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-		pBtn.Font = Enum.Font.GothamBold
-		pBtn.TextSize = 14
-		pBtn.AutoButtonColor = true
-		pBtn.Parent = plotButtonsFrame
-
-		local pBtnCorner = Instance.new("UICorner")
-		pBtnCorner.CornerRadius = UDim.new(0, 10)
-		pBtnCorner.Parent = pBtn
-
-		plotButtons[i] = pBtn
-	end
 
 	-- ============================================
 	-- GUI UPDATE LOGIC
@@ -696,46 +514,44 @@ local function createAdvancedGUI(player)
 		local femboyC = getFemboyCost(player)
 		local tomboyC = getTomboyCost(player)
 		local collectValue = math.floor(profile.Milk * CONFIG.CASH_CONVERSION)
+		local upgradeCost = CONFIG.UPGRADE_BASE_COST * profile.BuildingLevel
 
-		statsLabel.Text = string.format(
-			"💰 Cash: $%d\n🥛 Milk: %d\n⚡ Production: %d/sec\n👗 Femboys: %d | 💪 Tomboys: %d\n📊 Store Level: %d",
-			profile.Cash,
-			profile.Milk,
-			production,
-			profile.FemboyWorkers,
-			profile.TomboyWorkers,
-			profile.StoreLevel
-		)
+		if profile.OwnedPlot == 0 then
+			statsLabel.Text = "❌ NO PLOT CLAIMED\n\nGo back to the HUB and claim a plot to get started!"
+			title.Text = "📍 UNCLAIMED"
+		else
+			statsLabel.Text = string.format(
+				"💰 Cash: $%d\n🥛 Milk: %d\n⚡ Production: %d/sec\n👗 Femboys: %d | 💪 Tomboys: %d\n🏢 Building Lv: %d",
+				profile.Cash,
+				profile.Milk,
+				production,
+				profile.FemboyWorkers,
+				profile.TomboyWorkers,
+				profile.BuildingLevel
+			)
+			title.Text = "📍 PLOT " .. profile.OwnedPlot
+		end
 
-		hireBtn.Text = "👗 Hire Femboy\n$" .. femboyC
-		tomboyBtn.Text = "💪 Hire Tomboy\n$" .. tomboyC
-		collectBtn.Text = "🥛 Collect Milk\n+" .. collectValue .. " Cash"
-
-		prestigeLabel.Text = string.format("⭐ Prestige: %.2fx | Rebirths: %d", profile.PrestigeMultiplier, profile.Rebirths)
-		rebirthBtn.Text = "🔥 REBIRTH / PRESTIGE 🔥 [" .. getRebirthCost(player) .. " Milk]"
+		hireBtn.Text = "👗 Hire\n$" .. femboyC
+		tomboyBtn.Text = "💪 Hire\n$" .. tomboyC
+		collectBtn.Text = "🥛 Collect\n+" .. collectValue
+		upgradeBtn.Text = "🏢 Upgrade\n$" .. upgradeCost
+		rebirthBtn.Text = "🔥 Rebirth\n[" .. getRebirthCost(player) .. "]"
 
 		-- Update button colors
 		hireBtn.BackgroundColor3 = profile.Cash >= femboyC and Color3.fromRGB(120, 190, 255) or Color3.fromRGB(93, 166, 255)
 		tomboyBtn.BackgroundColor3 = profile.Cash >= tomboyC and Color3.fromRGB(255, 130, 215) or Color3.fromRGB(255, 107, 198)
 		collectBtn.BackgroundColor3 = profile.Milk > 0 and Color3.fromRGB(80, 230, 140) or Color3.fromRGB(56, 208, 117)
+		upgradeBtn.BackgroundColor3 = profile.Cash >= upgradeCost and Color3.fromRGB(220, 170, 120) or Color3.fromRGB(200, 150, 100)
 		rebirthBtn.BackgroundColor3 = profile.Milk >= getRebirthCost(player) and Color3.fromRGB(255, 220, 100) or Color3.fromRGB(255, 190, 75)
 
-		-- Update plot buttons
-		for i = 1, 4 do
-			local p = getProfile(player)
-			if i <= p.PlotUnlocked then
-				plotButtons[i].BackgroundColor3 = Color3.fromRGB(100, 150, 200)
-				plotButtons[i].Text = "📍 PLOT " .. i .. "\nLV: " .. p.PlotUpgrades[i]
-			else
-				plotButtons[i].BackgroundColor3 = Color3.fromRGB(80, 80, 80)
-				plotButtons[i].Text = "🔒 PLOT " .. i .. "\n$" .. CONFIG.PLOT_UNLOCK_COST
-			end
-		end
+		prestigeLabel.Text = string.format("⭐ Prestige: %.2fx | Rebirths: %d", profile.PrestigeMultiplier, profile.Rebirths)
 	end
 
 	-- Hire Femboy
 	hireBtn.MouseButton1Click:Connect(function()
 		local profile = getProfile(player)
+		if profile.OwnedPlot == 0 then return end
 		local cost = getFemboyCost(player)
 		if profile.Cash >= cost then
 			subtractMoney(player, cost)
@@ -748,6 +564,7 @@ local function createAdvancedGUI(player)
 	-- Hire Tomboy
 	tomboyBtn.MouseButton1Click:Connect(function()
 		local profile = getProfile(player)
+		if profile.OwnedPlot == 0 then return end
 		local cost = getTomboyCost(player)
 		if profile.Cash >= cost then
 			subtractMoney(player, cost)
@@ -768,6 +585,25 @@ local function createAdvancedGUI(player)
 		updateStats()
 	end)
 
+	-- Upgrade building
+	upgradeBtn.MouseButton1Click:Connect(function()
+		local profile = getProfile(player)
+		if profile.OwnedPlot == 0 then return end
+		local cost = CONFIG.UPGRADE_BASE_COST * profile.BuildingLevel
+		if profile.Cash >= cost then
+			subtractMoney(player, cost)
+			profile.BuildingLevel = profile.BuildingLevel + 1
+			
+			-- Rebuild player's building
+			local plot = plots[profile.OwnedPlot]
+			if plot.buildingFolder then
+				plot.buildingFolder:Destroy()
+			end
+			buildPlayerBuilding(profile.OwnedPlot, player)
+			updateStats()
+		end
+	end)
+
 	-- Rebirth
 	rebirthBtn.MouseButton1Click:Connect(function()
 		local profile = getProfile(player)
@@ -776,17 +612,24 @@ local function createAdvancedGUI(player)
 			subtractMilk(player, cost)
 			profile.Rebirths = profile.Rebirths + 1
 			profile.PrestigeMultiplier = 1 + (profile.Rebirths * CONFIG.PRESTIGE_MULTIPLIER)
-			profile.StoreLevel = profile.StoreLevel + 1
+			profile.BuildingLevel = 1
 			profile.FemboyWorkers = 0
 			profile.TomboyWorkers = 0
-			profile.Cash = 0
+			profile.Cash = CONFIG.STARTING_CASH
 			profile.Level = 1
+			
+			-- Rebuild with level 1
+			local plot = plots[profile.OwnedPlot]
+			if plot.buildingFolder then
+				plot.buildingFolder:Destroy()
+			end
+			buildPlayerBuilding(profile.OwnedPlot, player)
 			updateStats()
 		end
 	end)
 
 	-- ============================================
-	-- SHOP SYSTEM FOR DECOR
+	-- SHOP SYSTEM
 	-- ============================================
 
 	local shopGui = Instance.new("ScreenGui")
@@ -831,10 +674,6 @@ local function createAdvancedGUI(player)
 	closeShop.Font = Enum.Font.GothamBold
 	closeShop.TextSize = 20
 	closeShop.Parent = shopFrame
-
-	local closeCorner = Instance.new("UICorner")
-	closeCorner.CornerRadius = UDim.new(0, 8)
-	closeCorner.Parent = closeShop
 
 	local itemsContainer = Instance.new("Frame")
 	itemsContainer.Size = UDim2.new(1, -30, 1, -80)
@@ -904,38 +743,6 @@ local function createAdvancedGUI(player)
 		shopGui.Enabled = true
 	end)
 
-	-- ============================================
-	-- PLOT UPGRADE SYSTEM
-	-- ============================================
-
-	for i = 1, 4 do
-		plotButtons[i].MouseButton1Click:Connect(function()
-			local profile = getProfile(player)
-			
-			if i > profile.PlotUnlocked then
-				-- Unlock plot
-				if profile.Cash >= CONFIG.PLOT_UNLOCK_COST then
-					subtractMoney(player, CONFIG.PLOT_UNLOCK_COST)
-					profile.PlotUnlocked = i
-					plots[i].locked = false
-					plots[i].pad.Transparency = 0
-					plots[i].pad.CanCollide = true
-					plots[i].sign.Color = Color3.fromRGB(100, 200, 0)
-					updateStats()
-				end
-			else
-				-- Upgrade plot
-				local upgradeCost = 500 * (profile.PlotUpgrades[i] or 1)
-				if profile.Cash >= upgradeCost then
-					subtractMoney(player, upgradeCost)
-					profile.PlotUpgrades[i] = (profile.PlotUpgrades[i] or 1) + 1
-					plots[i].upgradeLabel.Text = "LV: " .. profile.PlotUpgrades[i]
-					updateStats()
-				end
-			end
-		end)
-	end
-
 	-- Auto refresh stats
 	task.spawn(function()
 		while screenGui and screenGui.Parent do
@@ -949,15 +756,109 @@ local function createAdvancedGUI(player)
 end
 
 -- ============================================
+-- PLOT CLAIMING
+-- ============================================
+
+local function claimPlot(plotNumber, player)
+	local profile = getProfile(player)
+	local plot = plots[plotNumber]
+	
+	if plot.owner then
+		return false
+	end
+	
+	profile.OwnedPlot = plotNumber
+	plot.owner = player.UserId
+	plotOwnership[plotNumber] = player.UserId
+	
+	-- Update plot sign
+	plot.claimLabel.Text = "PLOT " .. plotNumber .. "\n[" .. player.Name .. "]"
+	plot.claimSign.Color = Color3.fromRGB(100, 200, 0)
+	
+	-- Build player's building
+	buildPlayerBuilding(plotNumber, player)
+	
+	-- Teleport player to their plot
+	local char = player.Character
+	if char and char:FindFirstChild("HumanoidRootPart") then
+		task.wait(0.3)
+		char.HumanoidRootPart.CFrame = CFrame.new(plot.position + Vector3.new(0, 5, 0))
+	end
+	
+	return true
+end
+
+-- ============================================
+-- PLOT DETECTION
+-- ============================================
+
+task.spawn(function()
+	while true do
+		task.wait(0.5)
+		for _, player in ipairs(Players:GetPlayers()) do
+			if player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
+				local hrp = player.Character.HumanoidRootPart
+				for i, plot in ipairs(plots) do
+					local distance = (hrp.Position - Vector3.new(plot.position.X, hrp.Position.Y, plot.position.Z)).Magnitude
+					if distance < 20 and not plot.owner then
+						-- Near unclaimed plot
+						local profile = getProfile(player)
+						if profile.OwnedPlot == 0 then
+							-- Show claim prompt
+							plot.claimLabel.Text = "PLOT " .. i .. "\n[UNCLAIMED]\n✓ CLICK SIGN TO CLAIM"
+						end
+					elseif distance > 25 and not plot.owner then
+						plot.claimLabel.Text = "PLOT " .. i .. "\n[UNCLAIMED]\nCLICK TO CLAIM"
+					end
+				end
+			end
+		end
+	end
+end)
+
+-- ============================================
+-- PLOT SIGN CLICK DETECTION
+-- ============================================
+
+local UserInputService = game:GetService("UserInputService")
+local mouse = Players.LocalPlayer:GetMouse() if Players.LocalPlayer else nil
+
+for _, player in ipairs(Players:GetPlayers()) do
+	local playerMouse = nil
+	player.CharacterAdded:Connect(function(character)
+		task.wait(0.5)
+		if player:FindFirstChild("Mouse") then
+			playerMouse = player:GetMouse()
+		end
+	end)
+end
+
+-- Server-side detection using touched events
+for i, plot in ipairs(plots) do
+	local clickDetector = Instance.new("ClickDetector")
+	clickDetector.MaxActivationDistance = 30
+	clickDetector.Parent = plot.claimSign
+	
+	clickDetector.MouseClick:Connect(function(player)
+		local profile = getProfile(player)
+		if profile.OwnedPlot == 0 and not plot.owner then
+			claimPlot(i, player)
+		end
+	end)
+end
+
+-- ============================================
 -- PRODUCTION LOOP
 -- ============================================
 
 local function productionTick()
 	for _, player in ipairs(Players:GetPlayers()) do
 		local profile = getProfile(player)
-		local production = getProductionRate(player)
-		if production > 0 then
-			addMilk(player, production)
+		if profile.OwnedPlot > 0 then
+			local production = getProductionRate(player)
+			if production > 0 then
+				addMilk(player, production)
+			end
 		end
 	end
 end
@@ -987,6 +888,17 @@ end)
 
 Players.PlayerRemoving:Connect(function(player)
 	local key = tostring(player.UserId)
+	local profile = playerData[key]
+	if profile and profile.OwnedPlot > 0 then
+		-- Plot becomes available again
+		local plot = plots[profile.OwnedPlot]
+		plot.owner = nil
+		plot.claimLabel.Text = "PLOT " .. profile.OwnedPlot .. "\n[UNCLAIMED]\nCLICK TO CLAIM"
+		plot.claimSign.Color = Color3.fromRGB(100, 200, 255)
+		if plot.buildingFolder then
+			plot.buildingFolder:Destroy()
+		end
+	end
 	playerData[key] = nil
 end)
 
@@ -1000,7 +912,8 @@ for _, player in ipairs(Players:GetPlayers()) do
 	end
 end
 
-print("✅ FEMBOY MILK TYCOON - COMPLETE PROFESSIONAL VERSION LOADED")
-print("✅ Features: 5 Floors | 4 Plots | Per-Player Upgrades | Shop System")
-print("✅ Production: Femboys & Tomboys | Rebirth System | Full UI")
-print("✅ Ready for production deployment!")
+print("✅ FEMBOY MILK TYCOON - MULTIPLAYER PLOT EDITION LOADED")
+print("✅ Features: 8 Private Plots | Per-Player Buildings | Full Production")
+print("✅ Players claim plots and build their own tycoons!")
+print("✅ Starting Cash: $" .. CONFIG.STARTING_CASH)
+print("✅ Ready for multiplayer deployment!")
